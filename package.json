@@ -59,7 +59,7 @@
     "@sentry/node": "^8.47.0",
     "amqplib": "^0.10.5",
     "axios": "^1.7.9",
-    "baileys": "github:EvolutionAPI/Baileys",
+    "baileys": "github:WhiskeySockets/Baileys",
     "class-validator": "^0.14.1",
     "compression": "^1.7.5",
     "cors": "^2.8.5",
@@ -94,8 +94,7 @@
     "redis": "^4.7.0",
     "sharp": "^0.32.6",
     "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1",
-    "tsup": "^8.3.5"
+    "socket.io-client": "^4.8.1"
   },
   "devDependencies": {
     "@types/compression": "^1.7.5",
@@ -111,7 +110,7 @@
     "@types/uuid": "^10.0.0",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
-    "eslint": "^8.45.0",
+    "eslint": "^8.56.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-import": "^2.31.0",
     "eslint-plugin-prettier": "^5.2.1",
@@ -119,6 +118,7 @@
     "prettier": "^3.4.2",
     "ts-node-dev": "^2.0.0",
     "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "tsup": "^8.3.5"
   }
 }
