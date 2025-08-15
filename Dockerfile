@@ -1,8 +1,8 @@
 # ====== STAGE 1: BUILD ======
 FROM node:20-alpine AS builder
 
-# Dependências para build e scripts
-RUN apk add --no-cache git ffmpeg wget curl bash openssl dos2unix
+# Dependências para build e scripts (inclui dos2unix)
+RUN apk add --no-cache git ffmpeg wget curl bash openssl dos2unix ca-certificates
 
 WORKDIR /evolution
 
@@ -33,13 +33,15 @@ RUN npm run build
 # ====== STAGE 2: RUNTIME ======
 FROM node:20-alpine AS final
 
-RUN apk add --no-cache tzdata ffmpeg bash openssl \
+# TLS (ca-certificates) + timezone + utilitários
+RUN apk add --no-cache tzdata ffmpeg bash openssl ca-certificates \
     && addgroup -S nodegrp && adduser -S nodeusr -G nodegrp
 
 ENV TZ=America/Sao_Paulo \
     NODE_ENV=production \
     DOCKER_ENV=true \
-    PORT=8080
+    PORT=8080 \
+    NODE_OPTIONS=--dns-result-order=ipv4first
 
 WORKDIR /evolution
 

@@ -2,20 +2,27 @@ name: Publish Docker image
 
 on:
   push:
-    branches:
-      - '**'       # roda em qualquer branch (ajuste para ['main'] se quiser)
-    tags:
-      - 'v*'       # roda quando fizer push de tag (ex.: v2.3.1)
-  workflow_dispatch: {}  # permitir rodar manualmente
+    branches: ['**']          # build em qualquer branch (ajuste para ['main'] se quiser)
+    tags: ['v*', '*.*.*']     # v2.3.1 e 2.3.1
+  workflow_dispatch: {}
+
+# evita dois builds concorrentes do mesmo ref (branch/tag)
+concurrency:
+  group: docker-${{ github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -26,21 +33,28 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Gera tags automaticamente:
-      # - latest (somente no branch default)
-      # - nome-do-branch (para pushes sem tag)
-      # - sha curta
-      # - vX.Y.Z (quando push de tag v*)
+      # Tags geradas:
+      # - latest (apenas no branch padrão)
+      # - <branch> (ex.: main, dev) e sha curta
+      # - vX.Y.Z (se push de tag v*)
+      # - X.Y.Z / X.Y / X (se a tag for semver — com ou sem 'v')
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/evolution-api
           tags: |
+            # latest só no branch padrão
             type=raw,value=latest,enable={{is_default_branch}}
+            # branches
             type=ref,event=branch
             type=sha
+            # tag literal (mantém v2.3.1 quando vier com v)
             type=ref,event=tag
+            # variantes semver a partir do nome da tag (com ou sem 'v')
+            type=semver,pattern={{version}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}},value=${{ github.ref_name }}
           labels: |
             org.opencontainers.image.source=${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
