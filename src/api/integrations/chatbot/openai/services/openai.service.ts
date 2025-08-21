@@ -3,7 +3,7 @@ import { InstanceDto } from '@api/dto/instance.dto';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
 import { Integration } from '@api/types/wa.types';
-import { ConfigService, Language } from '@config/env.config';
+import { ConfigService, Language, Openai as OpenaiConfig } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { IntegrationSession, OpenaiBot, OpenaiCreds, OpenaiSetting } from '@prisma/client';
 import { sendTelemetry } from '@utils/sendTelemetry';
@@ -814,21 +814,47 @@ export class OpenaiService {
     return;
   }
 
-  public async speechToText(creds: OpenaiCreds, msg: any, updateMediaMessage: any) {
-    let audio;
+  /**
+   * Implementation of speech-to-text transcription for audio messages
+   */
+  public async speechToText(msg: any, instance: any): Promise<string | null> {
+    const settings = await this.prismaRepository.openaiSetting.findFirst({
+      where: {
+        instanceId: instance.instanceId,
+      },
+    });
 
-    if (msg?.message?.mediaUrl) {
+    if (!settings) {
+      this.logger.error(`OpenAI settings not found. InstanceId: ${instance.instanceId}`);
+      return null;
+    }
+
+    const creds = await this.prismaRepository.openaiCreds.findUnique({
+      where: { id: settings.openaiCredsId },
+    });
+
+    if (!creds) {
+      this.logger.error(`OpenAI credentials not found. CredsId: ${settings.openaiCredsId}`);
+      return null;
+    }
+
+    let audio: Buffer;
+
+    if (msg.message.mediaUrl) {
       audio = await axios.get(msg.message.mediaUrl, { responseType: 'arraybuffer' }).then((response) => {
         return Buffer.from(response.data, 'binary');
       });
+    } else if (msg.message.base64) {
+      audio = Buffer.from(msg.message.base64, 'base64');
     } else {
+      // Fallback for raw WhatsApp audio messages that need downloadMediaMessage
       audio = await downloadMediaMessage(
         { key: msg.key, message: msg?.message },
         'buffer',
         {},
         {
           logger: P({ level: 'error' }) as any,
-          reuploadRequest: updateMediaMessage,
+          reuploadRequest: instance,
         },
       );
     }
@@ -838,15 +864,16 @@ export class OpenaiService {
       : this.configService.get<Language>('LANGUAGE');
 
     const formData = new FormData();
-
     formData.append('file', audio, 'audio.ogg');
     formData.append('model', 'whisper-1');
     formData.append('language', lang);
 
+    const apiKey = creds?.apiKey || this.configService.get<OpenaiConfig>('OPENAI').API_KEY_GLOBAL;
+
     const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
-        Authorization: `Bearer ${creds.apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
       },
     });
 

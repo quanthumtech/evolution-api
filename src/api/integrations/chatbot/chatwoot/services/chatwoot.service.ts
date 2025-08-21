@@ -26,7 +26,7 @@ import axios from 'axios';
 import { proto } from 'baileys';
 import dayjs from 'dayjs';
 import FormData from 'form-data';
-import Jimp from 'jimp';
+import { Jimp, JimpMime } from 'jimp';
 import Long from 'long';
 import mimeTypes from 'mime-types';
 import path from 'path';
@@ -295,51 +295,57 @@ export class ChatwootService {
     avatar_url?: string,
     jid?: string,
   ) {
-    const client = await this.clientCw(instance);
+    try {
+      const client = await this.clientCw(instance);
 
-    if (!client) {
-      this.logger.warn('client not found');
-      return null;
-    }
-
-    let data: any = {};
-    if (!isGroup) {
-      data = {
-        inbox_id: inboxId,
-        name: name || phoneNumber,
-        identifier: jid,
-        avatar_url: avatar_url,
-      };
-
-      if ((jid && jid.includes('@')) || !jid) {
-        data['phone_number'] = `+${phoneNumber}`;
+      if (!client) {
+        this.logger.warn('client not found');
+        return null;
       }
-    } else {
-      data = {
-        inbox_id: inboxId,
-        name: name || phoneNumber,
-        identifier: phoneNumber,
-        avatar_url: avatar_url,
-      };
-    }
 
-    const contact = await client.contacts.create({
-      accountId: this.provider.accountId,
-      data,
-    });
+      let data: any = {};
+      if (!isGroup) {
+        data = {
+          inbox_id: inboxId,
+          name: name || phoneNumber,
+          identifier: jid,
+          avatar_url: avatar_url,
+        };
 
-    if (!contact) {
-      this.logger.warn('contact not found');
+        if ((jid && jid.includes('@')) || !jid) {
+          data['phone_number'] = `+${phoneNumber}`;
+        }
+      } else {
+        data = {
+          inbox_id: inboxId,
+          name: name || phoneNumber,
+          identifier: phoneNumber,
+          avatar_url: avatar_url,
+        };
+      }
+
+      const contact = await client.contacts.create({
+        accountId: this.provider.accountId,
+        data,
+      });
+
+      if (!contact) {
+        this.logger.warn('contact not found');
+        return null;
+      }
+
+      const findContact = await this.findContact(instance, phoneNumber);
+
+      const contactId = findContact?.id;
+
+      await this.addLabelToContact(this.provider.nameInbox, contactId);
+
+      return contact;
+    } catch (error) {
+      this.logger.error('Error creating contact');
+      console.log(error);
       return null;
     }
-
-    const findContact = await this.findContact(instance, phoneNumber);
-
-    const contactId = findContact?.id;
-
-    await this.addLabelToContact(this.provider.nameInbox, contactId);
-
-    return contact;
   }
 
   public async updateContact(instance: InstanceDto, id: number, data: any) {
@@ -561,15 +567,22 @@ export class ChatwootService {
   }
 
   public async createConversation(instance: InstanceDto, body: any) {
-    const isLid = body.key.remoteJid.includes('@lid') && body.key.senderPn;
-    const remoteJid = isLid ? body.key.senderPn : body.key.remoteJid;
+    if (!body?.key) {
+      this.logger.warn(
+        `body.key is null or undefined in createConversation. Full body object: ${JSON.stringify(body)}`,
+      );
+      return null;
+    }
+
+    const isLid = body.key.previousRemoteJid?.includes('@lid') && body.key.senderPn;
+    const remoteJid = body.key.remoteJid;
     const cacheKey = `${instance.instanceName}:createConversation-${remoteJid}`;
     const lockKey = `${instance.instanceName}:lock:createConversation-${remoteJid}`;
     const maxWaitTime = 5000; // 5 secounds
 
     try {
       // Processa atualização de contatos já criados @lid
-      if (body.key.remoteJid.includes('@lid') && body.key.senderPn && body.key.senderPn !== body.key.remoteJid) {
+      if (isLid && body.key.senderPn !== body.key.previousRemoteJid) {
         const contact = await this.findContact(instance, body.key.remoteJid.split('@')[0]);
         if (contact && contact.identifier !== body.key.senderPn) {
           this.logger.verbose(
@@ -668,7 +681,7 @@ export class ChatwootService {
               instance,
               body.key.participant.split('@')[0],
               filterInbox.id,
-              isGroup,
+              false,
               body.pushName,
               picture_url.profilePictureUrl || null,
               body.key.participant,
@@ -707,7 +720,6 @@ export class ChatwootService {
             }
           }
         } else {
-          const jid = isLid && body?.key?.senderPn ? body.key.senderPn : body.key.remoteJid;
           contact = await this.createContact(
             instance,
             chatId,
@@ -715,7 +727,7 @@ export class ChatwootService {
             isGroup,
             nameContact,
             picture_url.profilePictureUrl || null,
-            jid,
+            remoteJid,
           );
         }
 
@@ -983,7 +995,7 @@ export class ChatwootService {
     quotedMsg?: MessageModel,
   ) {
     if (sourceId && this.isImportHistoryAvailable()) {
-      const messageAlreadySaved = await chatwootImport.getExistingSourceIds([sourceId]);
+      const messageAlreadySaved = await chatwootImport.getExistingSourceIds([sourceId], conversationId);
       if (messageAlreadySaved) {
         if (messageAlreadySaved.size > 0) {
           this.logger.warn('Message already saved on chatwoot');
@@ -1163,7 +1175,8 @@ export class ChatwootService {
         return messageSent;
       }
 
-      if (type === 'image' && parsedMedia && parsedMedia?.ext === '.gif') {
+      const documentExtensions = ['.gif', '.svg', '.tiff', '.tif'];
+      if (type === 'image' && parsedMedia && documentExtensions.includes(parsedMedia?.ext)) {
         type = 'document';
       }
 
@@ -1705,7 +1718,7 @@ export class ChatwootService {
       stickerMessage: undefined,
       documentMessage: msg.documentMessage?.caption,
       documentWithCaptionMessage: msg.documentWithCaptionMessage?.message?.documentMessage?.caption,
-      audioMessage: msg.audioMessage?.caption,
+      audioMessage: msg.audioMessage ? (msg.audioMessage.caption ?? '') : undefined,
       contactMessage: msg.contactMessage?.vcard,
       contactsArrayMessage: msg.contactsArrayMessage,
       locationMessage: msg.locationMessage,
@@ -1887,6 +1900,12 @@ export class ChatwootService {
 
   public async eventWhatsapp(event: string, instance: InstanceDto, body: any) {
     try {
+      // Ignore events that are not messages (like EPHEMERAL_SYNC_RESPONSE)
+      if (body?.type && body.type !== 'message' && body.type !== 'conversation') {
+        this.logger.verbose(`Ignoring non-message event type: ${body.type}`);
+        return;
+      }
+
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
 
       if (!waInstance) {
@@ -1932,6 +1951,11 @@ export class ChatwootService {
       }
 
       if (event === 'messages.upsert' || event === 'send.message') {
+        if (!body?.key) {
+          this.logger.warn(`body.key is null or undefined. Full body object: ${JSON.stringify(body)}`);
+          return;
+        }
+
         if (body.key.remoteJid === 'status@broadcast') {
           return;
         }
@@ -1950,7 +1974,7 @@ export class ChatwootService {
               .replaceAll(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~')
           : originalMessage;
 
-        if (bodyMessage && bodyMessage.includes('Por favor, classifique esta conversa, http')) {
+        if (bodyMessage && bodyMessage.includes('/survey/responses/') && bodyMessage.includes('http')) {
           return;
         }
 
@@ -2122,9 +2146,11 @@ export class ChatwootService {
           const fileData = Buffer.from(imgBuffer.data, 'binary');
 
           const img = await Jimp.read(fileData);
-          await img.cover(320, 180);
-
-          const processedBuffer = await img.getBufferAsync(Jimp.MIME_PNG);
+          await img.cover({
+            w: 320,
+            h: 180,
+          });
+          const processedBuffer = await img.getBuffer(JimpMime.png);
 
           const fileStream = new Readable();
           fileStream._read = () => {}; // _read is required but you can noop it
@@ -2251,11 +2277,24 @@ export class ChatwootService {
         }
       }
 
-      if (event === 'messages.edit') {
+      if (event === 'messages.edit' || event === 'send.message.update') {
+        // Ignore events that are not messages (like EPHEMERAL_SYNC_RESPONSE)
+        if (body?.type && body.type !== 'message') {
+          this.logger.verbose(`Ignoring non-message event type: ${body.type}`);
+          return;
+        }
+
+        if (!body?.key?.id) {
+          this.logger.warn(
+            `body.key.id is null or undefined in messages.edit. Full body object: ${JSON.stringify(body)}`,
+          );
+          return;
+        }
+
         const editedText = `${
           body?.editedMessage?.conversation || body?.editedMessage?.extendedTextMessage?.text
         }\n\n_\`${i18next.t('cw.message.edited')}.\`_`;
-        const message = await this.getMessageByKeyId(instance, body?.key?.id);
+        const message = await this.getMessageByKeyId(instance, body.key.id);
         const key = message.key as {
           id: string;
           fromMe: boolean;
