@@ -163,6 +163,20 @@ export class BusinessStartupService extends ChannelStartupService {
     return content;
   }
 
+  private messageAudioJson(received: any) {
+    const message = received.messages[0];
+    let content: any = {
+      audioMessage: {
+        ...message.audio,
+        ptt: message.audio.voice || false, // Define se é mensagem de voz
+      },
+    };
+    if (message.context) {
+      content = { ...content, contextInfo: { stanzaId: message.context.id } };
+    }
+    return content;
+  }
+
   private messageInteractiveJson(received: any) {
     const message = received.messages[0];
     let content: any = { conversation: message.interactive[message.interactive.type].title };
@@ -291,7 +305,7 @@ export class BusinessStartupService extends ChannelStartupService {
     return messageType;
   }
 
-  protected async messageHandle(received: any, database: Database, settings: any) {
+    protected async messageHandle(received: any, database: Database, settings: any) {
     try {
       let messageRaw: any;
       let pushName: any;
@@ -299,17 +313,36 @@ export class BusinessStartupService extends ChannelStartupService {
       if (received.contacts) pushName = received.contacts[0].profile.name;
 
       if (received.messages) {
+        const message = received.messages[0]; // Añadir esta línea para definir message
+
         const key = {
-          id: received.messages[0].id,
+          id: message.id,
           remoteJid: this.phoneNumber,
-          fromMe: received.messages[0].from === received.metadata.phone_number_id,
+          fromMe: message.from === received.metadata.phone_number_id,
         };
-        if (this.isMediaMessage(received?.messages[0])) {
+
+        if (message.type === 'sticker') {
+          this.logger.log('Procesando mensaje de tipo sticker');
           messageRaw = {
             key,
             pushName,
-            message: this.messageMediaJson(received),
-            contextInfo: this.messageMediaJson(received)?.contextInfo,
+            message: {
+              stickerMessage: message.sticker || {},
+            },
+            messageType: 'stickerMessage',
+            messageTimestamp: parseInt(message.timestamp) as number,
+            source: 'unknown',
+            instanceId: this.instanceId,
+          };
+        } else if (this.isMediaMessage(message)) {
+          const messageContent =
+            message.type === 'audio' ? this.messageAudioJson(received) : this.messageMediaJson(received);
+
+          messageRaw = {
+            key,
+            pushName,
+            message: messageContent,
+            contextInfo: messageContent?.contextInfo,
             messageType: this.renderMessageType(received.messages[0].type),
             messageTimestamp: parseInt(received.messages[0].timestamp) as number,
             source: 'unknown',
@@ -320,71 +353,151 @@ export class BusinessStartupService extends ChannelStartupService {
             try {
               const message: any = received;
 
-              const id = message.messages[0][message.messages[0].type].id;
-              let urlServer = this.configService.get<WaBusiness>('WA_BUSINESS').URL;
-              const version = this.configService.get<WaBusiness>('WA_BUSINESS').VERSION;
-              urlServer = `${urlServer}/${version}/${id}`;
-              const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` };
-              const result = await axios.get(urlServer, { headers });
+              // Verificação adicional para garantir que há conteúdo de mídia real
+              const hasRealMedia = this.hasValidMediaContent(messageRaw);
 
-              const buffer = await axios.get(result.data.url, { headers, responseType: 'arraybuffer' });
-
-              let mediaType;
-
-              if (message.messages[0].document) {
-                mediaType = 'document';
-              } else if (message.messages[0].image) {
-                mediaType = 'image';
-              } else if (message.messages[0].audio) {
-                mediaType = 'audio';
+              if (!hasRealMedia) {
+                this.logger.warn('Message detected as media but contains no valid media content');
               } else {
-                mediaType = 'video';
-              }
+                const id = message.messages[0][message.messages[0].type].id;
+                let urlServer = this.configService.get<WaBusiness>('WA_BUSINESS').URL;
+                const version = this.configService.get<WaBusiness>('WA_BUSINESS').VERSION;
+                urlServer = `${urlServer}/${version}/${id}`;
+                const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` };
+                const result = await axios.get(urlServer, { headers });
 
-              const mimetype = result.data?.mime_type || result.headers['content-type'];
+                const buffer = await axios.get(result.data.url, {
+                  headers: { Authorization: `Bearer ${this.token}` }, // Use apenas o token de autorização para download
+                  responseType: 'arraybuffer',
+                });
 
-              const contentDisposition = result.headers['content-disposition'];
-              let fileName = `${message.messages[0].id}.${mimetype.split('/')[1]}`;
-              if (contentDisposition) {
-                const match = contentDisposition.match(/filename="(.+?)"/);
-                if (match) {
-                  fileName = match[1];
+                let mediaType;
+
+                if (message.messages[0].document) {
+                  mediaType = 'document';
+                } else if (message.messages[0].image) {
+                  mediaType = 'image';
+                } else if (message.messages[0].audio) {
+                  mediaType = 'audio';
+                } else {
+                  mediaType = 'video';
+                }
+
+                const mimetype = result.data?.mime_type || result.headers['content-type'];
+
+                const contentDisposition = result.headers['content-disposition'];
+                let fileName = `${message.messages[0].id}.${mimetype.split('/')[1]}`;
+                if (contentDisposition) {
+                  const match = contentDisposition.match(/filename="(.+?)"/);
+                  if (match) {
+                    fileName = match[1];
+                  }
+                }
+
+                // Para áudio, garantir extensão correta baseada no mimetype
+                if (mediaType === 'audio') {
+                  if (mimetype.includes('ogg')) {
+                    fileName = `${message.messages[0].id}.ogg`;
+                  } else if (mimetype.includes('mp3')) {
+                    fileName = `${message.messages[0].id}.mp3`;
+                  } else if (mimetype.includes('m4a')) {
+                    fileName = `${message.messages[0].id}.m4a`;
+                  }
+                }
+
+                const size = result.headers['content-length'] || buffer.data.byteLength;
+
+                const fullName = join(`${this.instance.id}`, key.remoteJid, mediaType, fileName);
+
+                await s3Service.uploadFile(fullName, buffer.data, size, {
+                  'Content-Type': mimetype,
+                });
+
+                const createdMessage = await this.prismaRepository.message.create({
+                  data: messageRaw,
+                });
+
+                await this.prismaRepository.media.create({
+                  data: {
+                    messageId: createdMessage.id,
+                    instanceId: this.instanceId,
+                    type: mediaType,
+                    fileName: fullName,
+                    mimetype,
+                  },
+                });
+
+                const mediaUrl = await s3Service.getObjectUrl(fullName);
+
+                messageRaw.message.mediaUrl = mediaUrl;
+                messageRaw.message.base64 = buffer.data.toString('base64');
+
+                // Processar OpenAI speech-to-text para áudio após o mediaUrl estar disponível
+                if (this.configService.get<Openai>('OPENAI').ENABLED && mediaType === 'audio') {
+                  const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
+                    where: {
+                      instanceId: this.instanceId,
+                    },
+                    include: {
+                      OpenaiCreds: true,
+                    },
+                  });
+
+                  if (
+                    openAiDefaultSettings &&
+                    openAiDefaultSettings.openaiCredsId &&
+                    openAiDefaultSettings.speechToText
+                  ) {
+                    try {
+                      messageRaw.message.speechToText = `[audio] ${await this.openaiService.speechToText(
+                        openAiDefaultSettings.OpenaiCreds,
+                        {
+                          message: {
+                            mediaUrl: messageRaw.message.mediaUrl,
+                            ...messageRaw,
+                          },
+                        },
+                      )}`;
+                    } catch (speechError) {
+                      this.logger.error(`Error processing speech-to-text: ${speechError}`);
+                    }
+                  }
                 }
               }
-
-              const size = result.headers['content-length'] || buffer.data.byteLength;
-
-              const fullName = join(`${this.instance.id}`, key.remoteJid, mediaType, fileName);
-
-              await s3Service.uploadFile(fullName, buffer.data, size, {
-                'Content-Type': mimetype,
-              });
-
-              const createdMessage = await this.prismaRepository.message.create({
-                data: messageRaw,
-              });
-
-              await this.prismaRepository.media.create({
-                data: {
-                  messageId: createdMessage.id,
-                  instanceId: this.instanceId,
-                  type: mediaType,
-                  fileName: fullName,
-                  mimetype,
-                },
-              });
-
-              const mediaUrl = await s3Service.getObjectUrl(fullName);
-
-              messageRaw.message.mediaUrl = mediaUrl;
-              messageRaw.message.base64 = buffer.data.toString('base64');
             } catch (error) {
               this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
             }
           } else {
             const buffer = await this.downloadMediaMessage(received?.messages[0]);
-
             messageRaw.message.base64 = buffer.toString('base64');
+
+            // Processar OpenAI speech-to-text para áudio mesmo sem S3
+            if (this.configService.get<Openai>('OPENAI').ENABLED && message.type === 'audio') {
+              const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
+                where: {
+                  instanceId: this.instanceId,
+                },
+                include: {
+                  OpenaiCreds: true,
+                },
+              });
+
+              if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
+                try {
+                  messageRaw.message.speechToText = `[audio] ${await this.openaiService.speechToText(
+                    openAiDefaultSettings.OpenaiCreds,
+                    {
+                      message: {
+                        base64: messageRaw.message.base64,
+                        ...messageRaw,
+                      },
+                    },
+                  )}`;
+                } catch (speechError) {
+                  this.logger.error(`Error processing speech-to-text: ${speechError}`);
+                }
+              }
+            }
           }
         } else if (received?.messages[0].interactive) {
           messageRaw = {
@@ -455,37 +568,6 @@ export class BusinessStartupService extends ChannelStartupService {
           // await this.client.readMessages([received.key]);
         }
 
-        if (this.configService.get<Openai>('OPENAI').ENABLED) {
-          const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
-            where: {
-              instanceId: this.instanceId,
-            },
-            include: {
-              OpenaiCreds: true,
-            },
-          });
-
-          const audioMessage = received?.messages[0]?.audio;
-
-          if (
-            openAiDefaultSettings &&
-            openAiDefaultSettings.openaiCredsId &&
-            openAiDefaultSettings.speechToText &&
-            audioMessage
-          ) {
-            messageRaw.message.speechToText = await this.openaiService.speechToText(
-              openAiDefaultSettings.OpenaiCreds,
-              {
-                message: {
-                  mediaUrl: messageRaw.message.mediaUrl,
-                  ...messageRaw,
-                },
-              },
-              () => {},
-            );
-          }
-        }
-
         this.logger.log(messageRaw);
 
         this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
@@ -511,7 +593,7 @@ export class BusinessStartupService extends ChannelStartupService {
           }
         }
 
-        if (!this.isMediaMessage(received?.messages[0])) {
+        if (!this.isMediaMessage(message) && message.type !== 'sticker') {
           await this.prismaRepository.message.create({
             data: messageRaw,
           });
