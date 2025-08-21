@@ -3209,7 +3209,9 @@ export class BaileysStartupService extends ChannelStartupService {
       const numbersToVerify = normalUsers.map(({ jid }) => jid.replace('+', ''));
       console.log('numbersToVerify', numbersToVerify);
 
-      const cachedNumbers = await getOnWhatsappCache(numbersToVerify);
+      // Extend the type to include optional 'lid'
+      type CachedWhatsapp = { remoteJid: string; number: string; jidOptions: string[]; lid?: string };
+      const cachedNumbers: CachedWhatsapp[] = await getOnWhatsappCache(numbersToVerify);
       console.log('cachedNumbers', cachedNumbers);
 
       const filteredNumbers = numbersToVerify.filter(
